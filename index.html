@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebTV Player</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 { margin-bottom: 10px; }
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 100%;
+            max-width: 800px;
+        }
+        select {
+            padding: 10px;
+            background-color: #1e1e1e;
+            color: white;
+            border: 1px solid #333;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            min-width: 250px;
+        }
+        .player-container {
+            width: 100%;
+            max-width: 800px;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        }
+        video {
+            width: 100%;
+            display: block;
+            aspect-ratio: 16 / 9;
+        }
+        .loading {
+            color: #888;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>WebTV Client</h1>
+
+    <div class="controls">
+        <select id="playlistSelect">
+            <option value="">-- Playlist laden... --</option>
+        </select>
+
+        <select id="channelSelect" disabled>
+            <option value="">-- Erst Playlist wählen --</option>
+        </select>
+    </div>
+
+    <div class="player-container">
+        <video id="videoPlayer" controls autoplay muted></video>
+    </div>
+
+    <script>
+        const playlistSelect = document.getElementById('playlistSelect');
+        const channelSelect = document.getElementById('channelSelect');
+        const video = document.getElementById('videoPlayer');
+        let hls = null;
+
+        // 1. Playlists dynamisch von der GitHub API laden
+        async function fetchPlaylists() {
+            const apiUrl = "https://api.github.com/repos/Free-TV/IPTV/contents/playlists";
+            try {
+                const response = await fetch(apiUrl);
+                const files = await response.json();
+                
+                // Filtere nur .m3u8 Dateien
+                const m3u8Files = files.filter(file => file.name.endsWith('.m3u8'));
+                
+                playlistSelect.innerHTML = '<option value="">-- Playlist auswählen --</option>';
+                m3u8Files.forEach(file => {
+                    const option = document.createElement('option');
+                    // download_url führt direkt zum Raw-Inhalt
+                    option.value = file.download_url;
+                    // Schönerer Name ohne "playlist_" und ".m3u8"
+                    option.textContent = file.name.replace('playlist_', '').replace('.m3u8', '').toUpperCase();
+                    playlistSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error("Fehler beim Laden der Playlists:", error);
+                playlistSelect.innerHTML = '<option value="">Fehler beim Laden</option>';
+            }
+        }
+
+        // 2. M3U8 Playlist parsen (Sender extrahieren)
+        async function loadPlaylist(url) {
+            if (!url) return;
+            channelSelect.innerHTML = '<option>Parsing läuft...</option>';
+            channelSelect.disabled = true;
+
+            try {
+                const response = await fetch(url);
+                const text = await response.text();
+                
+                const lines = text.split('\n');
+                const channels = [];
+
+                for (let i = 0; i < lines.length; i++) {
+                    let line = lines[i].trim();
+                    
+                    if (line.startsWith('#EXTINF:')) {
+                        // Extrahiere tvg-name und tvg-logo mittels Regex
+                        const nameMatch = line.match(/tvg-name="([^"]+)"/);
+                        const logoMatch = line.match(/tvg-logo="([^"]+)"/);
+                        
+                        // Der Sendername steht oft am Ende der #EXTINF Zeile nach dem Komma
+                        const commaIndex = line.lastIndexOf(',');
+                        let displayName = commaIndex !== -1 ? line.substring(commaIndex + 1).trim() : "Unbekannter Sender";
+                        
+                        if (nameMatch && !displayName) displayName = nameMatch[1];
+
+                        // Die nächste Zeile, die kein Kommentar ist, enthält die Stream-URL
+                        let urlLine = "";
+                        for (let j = i + 1; j < lines.length; j++) {
+                            let nextLine = lines[j].trim();
+                            if (nextLine && !nextLine.startsWith('#')) {
+                                urlLine = nextLine;
+                                i = j; // Setze den äußeren Index vorwärts
+                                break;
+                            }
+                        }
+
+                        if (urlLine) {
+                            channels.push({
+                                name: displayName,
+                                logo: logoMatch ? logoMatch[1] : '',
+                                url: urlLine
+                            });
+                        }
+                    }
+                }
+
+                // Sender-Dropdown befüllen
+                channelSelect.innerHTML = '<option value="">-- Sender auswählen --</option>';
+                channels.forEach(channel => {
+                    const option = document.createElement('option');
+                    option.value = channel.url;
+                    option.textContent = channel.name;
+                    channelSelect.appendChild(option);
+                });
+                channelSelect.disabled = false;
+
+            } catch (error) {
+                console.error("Fehler beim Parsen der Playlist:", error);
+                channelSelect.innerHTML = '<option>Fehler beim Parsen</option>';
+            }
+        }
+
+        // 3. Stream im Player abspielen
+        function playStream(url) {
+            if (!url) return;
+
+            if (Hls.isSupported()) {
+                if (hls) {
+                    hls.destroy(); // Vorherigen Stream stoppen
+                }
+                hls = new Hls();
+                hls.loadSource(url);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    video.play();
+                });
+            } 
+            // Für Safari (iOS/macOS), das HLS nativ unterstützt
+            else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = url;
+                video.addEventListener('loadedmetadata', function() {
+                    video.play();
+                });
+            }
+        }
+
+        // Event-Listener für Interaktionen
+        playlistSelect.addEventListener('change', (e) => loadPlaylist(e.target.value));
+        channelSelect.addEventListener('change', (e) => playStream(e.target.value));
+
+        // Initialisierung beim Laden der Seite
+        fetchPlaylists();
+    </script>
+</body>
+</html>
